@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables / secrets
+.env
+.env.*
+
+# YouTube downloads
+downloads/
+output/
+videos/
+audio/
+
+# Downloaded media
+*.mp4
+*.mkv
+*.webm
+*.avi
+*.mov
+*.mp3
+*.wav
+*.m4a
+*.flac
+
+# Download metadata / thumbnails
+*.part
+*.ytdl
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+build/
+dist/
+cookies.txt
