@@ -35,6 +35,8 @@ audio/
 *.jpeg
 *.png
 *.webp
+!Assets/icon.png
+!Assets/banner.png
 
 # Logs
 *.log
@@ -43,9 +45,12 @@ audio/
 .vscode/
 .idea/
 
-# OS
+# OS & Build artifacts
 Thumbs.db
 .DS_Store
 build/
 dist/
+ffmpeg/
 cookies.txt
+settings.json
+download_history.json

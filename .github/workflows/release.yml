@@ -1,0 +1,104 @@
+name: Build and Release Windows Executable
+
+on:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (e.g. v3.0.0)'
+        required: false
+        default: 'v3.0.0'
+      release_title:
+        description: 'Release Title'
+        required: false
+        default: 'Universal Video Downloader Pro v3.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Windows Application
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare FFmpeg for Standalone Bundling
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path ffmpeg
+          $ffmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
+          if (-not $ffmpegCmd) {
+            choco install ffmpeg -y --no-progress
+            $ffmpegCmd = Get-Command ffmpeg
+          }
+          Write-Host "Found FFmpeg at: $($ffmpegCmd.Source)"
+          Copy-Item $ffmpegCmd.Source -Destination ffmpeg\ffmpeg.exe
+
+          $ffprobeCmd = Get-Command ffprobe -ErrorAction SilentlyContinue
+          if ($ffprobeCmd) {
+            Write-Host "Found FFprobe at: $($ffprobeCmd.Source)"
+            Copy-Item $ffprobeCmd.Source -Destination ffmpeg\ffprobe.exe
+          }
+
+      - name: Build Executable with PyInstaller
+        shell: powershell
+        run: |
+          pyinstaller --clean Youtube.spec
+
+      - name: Package Release Assets & Generate Checksums
+        shell: powershell
+        run: |
+          # Create zip archive alongside the direct exe
+          Compress-Archive -Path dist\Youtube.exe -DestinationPath Youtube-Downloader-Windows-x64.zip -Force
+
+          # Generate SHA256 hashes
+          $exeHash = (Get-FileHash -Algorithm SHA256 dist\Youtube.exe).Hash
+          $zipHash = (Get-FileHash -Algorithm SHA256 Youtube-Downloader-Windows-x64.zip).Hash
+          @"
+          SHA256 Checksums:
+          $exeHash  Youtube.exe
+          $zipHash  Youtube-Downloader-Windows-x64.zip
+          "@ | Out-File -Encoding utf8 checksums.txt
+
+      - name: Upload Artifacts to Workflow Run
+        uses: actions/upload-artifact@v4
+        with:
+          name: Youtube-Downloader-Windows-x64
+          path: |
+            dist/Youtube.exe
+            Youtube-Downloader-Windows-x64.zip
+            checksums.txt
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
+          name: ${{ github.event.inputs.release_title || github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/Youtube.exe
+            Youtube-Downloader-Windows-x64.zip
+            checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -3,17 +3,30 @@
 import sys
 import os
 
+from PyInstaller.utils.hooks import collect_data_files
+
 block_cipher = None
+
+datas = [
+    ('Assets', 'Assets')
+]
+datas += collect_data_files('customtkinter')
+
+# Include ffmpeg folder if present in build environment
+for ffmpeg_path in ['ffmpeg', 'dist/ffmpeg']:
+    if os.path.isdir(ffmpeg_path):
+        datas.append((ffmpeg_path, 'ffmpeg'))
+        break
+
+# Include cookies.txt only if present in working directory
+if os.path.isfile('cookies.txt'):
+    datas.append(('cookies.txt', '.'))
 
 a = Analysis(
     ['Youtube.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('Assets', 'Assets'),
-        ('dist/ffmpeg', 'ffmpeg'),
-        ('cookies.txt', '.')
-    ],
+    datas=datas,
     hiddenimports=[
         'customtkinter',
         'PIL',
@@ -51,5 +64,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['Assets\\icon.ico'],
+    icon=[os.path.join('Assets', 'icon.ico')],
 )
