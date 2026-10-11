@@ -1,24 +1,34 @@
-# Universal Video Downloader Pro
+# Universal Video Downloader Pro v4.0.0
 
 A modern, high-performance desktop video & audio downloader application for Windows built with Python, CustomTkinter, and `yt-dlp`.
 
 ![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-brightgreen.svg)
-![Release](https://img.shields.io/badge/Release-Executable%20(.exe)-red.svg)
+![Release](https://img.shields.io/badge/Release-v4.0.0-red.svg)
+![yt-dlp](https://img.shields.io/badge/yt--dlp-2026%2B%20Latest-orange.svg)
 
 ---
 
-## Features
+## 🌟 What's New in Version 4.0.0
 
-- **Modern Dark Theme UI**: Built with CustomTkinter for sleek, native-feeling Windows design.
-- **Universal Downloader**: Powered by `yt-dlp`, supporting YouTube, playlists, channels, and 1000+ streaming sites.
-- **Standalone Portable `.exe`**: Single-file executable with embedded FFmpeg for automatic audio extraction and video muxing. No external tools or Python installation needed by end users!
-- **Format Flexibility**:
-  - Video: 4K, 2K, 1080p, 720p, 480p, 360p (MP4, MKV, WebM)
-  - Audio: MP3 (320kbps, 256kbps, 192kbps, 128kbps), M4A, WAV, FLAC
-- **Subtitles & Metadata**: Optional subtitle download, chapter extraction, and thumbnail embedding.
-- **Browser Cookies & Auth**: Support for auto-detecting browser cookies (Chrome, Edge, Firefox, Brave, Opera, Vivaldi) or custom `cookies.txt` for age-restricted/member-only content.
-- **Download History & Analytics**: Built-in history viewer and management.
+### 1. 📑 Full Download Queue with Pause, Resume & Retry
+- **Multi-Item Queue Management**: Queue dozens or hundreds of videos with sequential or concurrent processing (1, 2, or 3 parallel downloads).
+- **Pause & Resume**: Seamlessly pause active downloads. Temporary `.part` files are preserved and resumed via HTTP byte range streaming without restarting from 0%.
+- **Intelligent Retry**: Instantly retry any failed or interrupted downloads with a single click.
+- **Batch Import**: Paste multiple URLs (one per line) to batch-queue videos or playlists with preset audio/video format and quality.
+- **Live Progress & Speeds**: Individual progress bars, dynamic download speed calculation, remaining size, and ETA per item.
+
+### 2. 🤖 AI Multi-Platform Video Discovery & Browsing
+- **Natural Language Search**: Ask the built-in AI search assistant in plain English (e.g., *"Dark fantasy anime by MAPPA studio"*, *"Stranger Things on Netflix"*, *"Python GUI tutorials"*).
+- **Universal Multi-Platform Support**:
+  - **YouTube**: Displays verified **Channel Names**, upload duration, view counts, and direct 1-click download links.
+  - **Anime & Crunchyroll**: Displays exact **Animation Studio Names** (e.g., MAPPA, ufotable, Bones, Wit Studio, Madhouse, Toei Animation, Kyoto Animation, CloverWorks, A-1 Pictures), user ratings, episode counts, genres, and stream links.
+  - **Netflix & Amazon Prime Video**: Discovers series/movies with **Production Studios / Networks**, release year, synopsis, and direct watch links.
+  - **Other Platforms**: Vimeo, Twitch, Dailymotion, Bilibili, and 1000+ web sources.
+- **1-Click Queueing**: Add any discovered video or anime directly to your download queue.
+
+### 3. 🔄 yt-dlp Core Engine Updates
+- Built-in one-click yt-dlp updater in the **Settings** tab to keep the extraction engine ahead of platform signature changes and anti-bot measures.
 
 ---
 
@@ -26,8 +36,8 @@ A modern, high-performance desktop video & audio downloader application for Wind
 
 ### Option 1: Pre-built Windows Executable (.exe)
 1. Head over to the **[GitHub Releases](https://github.com/LazarusEffect-dotcom/All_Download/releases)** section.
-2. Download the latest `Youtube.exe` or `Youtube-Downloader-Windows-x64.zip`.
-3. Run the executable directly. No installer or dependencies required.
+2. Download `Youtube.exe` or `Youtube-Downloader-Windows-x64.zip` from release **v4.0.0**.
+3. Run the executable directly. FFmpeg is embedded; no installation or Python required!
 
 ---
 
@@ -78,16 +88,11 @@ This repository includes a GitHub Actions workflow (`.github/workflows/release.y
 ### Deploying a New Release:
 1. **Push a Git tag**:
    ```bash
-   git tag v3.0.0
-   git push origin v3.0.0
+   git tag v4.0.0
+   git push origin v4.0.0
    ```
 2. **Or trigger manually via GitHub Actions**:
    - Go to your repository on GitHub.
    - Click on the **Actions** tab.
    - Select **Build and Release Windows Executable**.
-   - Click **Run workflow**, specify the release tag (e.g., `v3.0.0`), and run.
-3. The workflow will:
-   - Install dependencies and prepare FFmpeg binaries.
-   - Build the standalone `.exe` via PyInstaller.
-   - Generate SHA-256 checksums and zip packages.
-   - Publish the release to GitHub Releases with downloadable assets attached.
+   - Click **Run workflow**, specify the release tag (`v4.0.0`), and run.
