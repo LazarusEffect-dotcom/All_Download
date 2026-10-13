@@ -32,7 +32,7 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 APP_NAME = "Universal Video Downloader Pro"
-APP_VERSION = "v4.0.0"
+APP_VERSION = "v4.1.0"
 HISTORY_FILE = "download_history.json"
 OLD_HISTORY_FILE = "download_history.txt"
 SETTINGS_FILE = "settings.json"
@@ -70,7 +70,7 @@ def get_ffmpeg_path():
     ]
     for path in candidates:
         if os.path.exists(path):
-            return path
+            return os.path.normpath(path)
     return "ffmpeg"
 
 def load_settings():
@@ -160,6 +160,54 @@ def is_valid_url(query):
 class DownloadPausedException(Exception):
     """Exception raised to pause download gracefully preserving the .part file."""
     pass
+
+def finalize_livestream_file(partial_filepath, final_filepath):
+    """
+    Takes a partial livestream file (.part or incomplete container)
+    and uses ffmpeg to copy streams into a clean, finalized, playable container (.mp4).
+    """
+    ffmpeg_bin = get_ffmpeg_path()
+    try:
+        source_path = None
+        if os.path.exists(partial_filepath) and os.path.getsize(partial_filepath) > 1024:
+            source_path = partial_filepath
+        elif os.path.exists(final_filepath) and os.path.getsize(final_filepath) > 1024:
+            source_path = final_filepath
+
+        if source_path:
+            # Create a temporary output name if in-place remuxing
+            temp_remux = final_filepath + ".remux.mp4"
+            remux_cmd = [
+                ffmpeg_bin, "-y",
+                "-i", os.path.normpath(source_path),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                os.path.normpath(temp_remux)
+            ]
+            res = subprocess.run(remux_cmd, capture_output=True, text=True)
+            if os.path.exists(temp_remux) and os.path.getsize(temp_remux) > 0:
+                if os.path.exists(final_filepath):
+                    try:
+                        os.remove(final_filepath)
+                    except Exception:
+                        pass
+                os.rename(temp_remux, final_filepath)
+                if source_path != final_filepath and os.path.exists(source_path):
+                    try:
+                        os.remove(source_path)
+                    except Exception:
+                        pass
+                return True
+            elif source_path != final_filepath:
+                # If remux didn't succeed, rename part file as fallback
+                try:
+                    os.rename(source_path, final_filepath)
+                    return True
+                except Exception:
+                    pass
+    except Exception as e:
+        print("Finalize livestream error:", e)
+    return False
 
 
 # ==========================================
@@ -302,6 +350,7 @@ class AISearchEngine:
                 data = r.json()
                 for item in data[:max_results]:
                     show = item.get('show', {})
+                    show_id = show.get('id')
                     network = show.get('webChannel') or show.get('network') or {}
                     network_name = network.get('name') if isinstance(network, dict) else "Original Studio / Network"
                     
@@ -349,6 +398,7 @@ class AISearchEngine:
                         plat_url = show.get('url', f"https://www.google.com/search?q={urllib.parse.quote(title + ' watch online')}")
 
                     results.append({
+                        "id": show_id,
                         "platform": platform,
                         "title": title,
                         "channel_or_studio": network_name,
@@ -360,9 +410,11 @@ class AISearchEngine:
                         "score": rating_str,
                         "year": year,
                         "episodes": f"Status: {show.get('status', 'Released')}",
+                        "status": show.get('status', 'Released'),
                         "genres": show.get('genres', [])[:3],
                         "description": summary,
                         "downloadable": False,
+                        "is_show": True,
                         "platform_url": plat_url,
                         "search_query": title
                     })
@@ -371,7 +423,212 @@ class AISearchEngine:
         return results
 
     @classmethod
-    def ai_smart_search(cls, query, platform="All", max_total=16):
+    def search_shows(cls, query, max_results=12):
+        """Dedicated TV Shows search with season/episode browsing support."""
+        results = []
+        try:
+            url = f"https://api.tvmaze.com/search/shows?q={urllib.parse.quote(query)}"
+            r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=8)
+            if r.status_code == 200:
+                for item in r.json()[:max_results]:
+                    show = item.get('show', {})
+                    show_id = show.get('id')
+                    net = (show.get('network') or show.get('webChannel') or {}).get('name') or "TV Network"
+                    rating = show.get('rating', {}).get('average')
+                    rating_str = f"★ {rating}/10" if rating else "N/A"
+                    premiered = show.get('premiered', '')
+                    year = premiered.split('-')[0] if premiered else "N/A"
+                    img = show.get('image') or {}
+                    cover = img.get('medium') or img.get('original') or ""
+                    summary = re.sub(r'<[^>]+>', '', show.get('summary') or '').strip()[:240]
+                    title = show.get('name', 'Untitled Show')
+                    results.append({
+                        "id": show_id,
+                        "title": title,
+                        "platform": "TV Shows",
+                        "channel_or_studio": net,
+                        "channel_type": "Network",
+                        "url": show.get('officialSite') or show.get('url') or f"https://www.google.com/search?q={urllib.parse.quote(title)}",
+                        "thumbnail": cover,
+                        "duration": None,
+                        "views": None,
+                        "score": rating_str,
+                        "year": year,
+                        "status": show.get('status', 'Released'),
+                        "episodes": f"Status: {show.get('status', 'Released')}",
+                        "genres": show.get('genres', [])[:3],
+                        "description": summary,
+                        "downloadable": False,
+                        "is_show": True,
+                        "platform_url": show.get('url', ''),
+                        "search_query": f"{title} trailer episode"
+                    })
+        except Exception as e:
+            print("Search shows error:", e)
+        return results
+
+    @classmethod
+    def get_popular_shows(cls, count=12):
+        """Fetches curated top popular TV series and web shows."""
+        popular_titles = [
+            "Breaking Bad", "Stranger Things", "The Boys", "Game of Thrones",
+            "The Last of Us", "House of the Dragon", "Loki", "Wednesday",
+            "Shogun", "Arcane", "Fallout", "Severance"
+        ]
+        results = []
+        for name in popular_titles[:count]:
+            found = cls.search_shows(name, max_results=1)
+            if found:
+                results.append(found[0])
+        return results
+
+    @staticmethod
+    def get_show_episodes(show_id):
+        """Fetches all episodes grouped by season for a TV show via TVMaze."""
+        try:
+            url = f"https://api.tvmaze.com/shows/{show_id}/episodes"
+            r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=8)
+            if r.status_code == 200:
+                eps = []
+                for ep in r.json():
+                    summary = re.sub(r'<[^>]+>', '', ep.get('summary') or '').strip()
+                    img = ep.get('image') or {}
+                    eps.append({
+                        "id": ep.get('id'),
+                        "season": ep.get('season') or 1,
+                        "number": ep.get('number') or 1,
+                        "name": ep.get('name') or "Episode",
+                        "airdate": ep.get('airdate') or "N/A",
+                        "runtime": ep.get('runtime') or 0,
+                        "summary": summary,
+                        "thumbnail": img.get('medium') or img.get('original') or ""
+                    })
+                return eps
+        except Exception as e:
+            print("Episodes fetch error:", e)
+        return []
+
+    @staticmethod
+    def search_livestreams(query="", category="all", max_results=16):
+        """
+        Discovers active live streams across YouTube Live and Twitch with viewer counts
+        and 1-click recording capability.
+        """
+        results = []
+
+        # 1. Twitch Live Streams (for all, twitch, or gaming categories)
+        if category in ["all", "twitch", "gaming"]:
+            try:
+                headers = {"Client-ID": "kimne78kx3ncx6brgo4mv6wki5h1ko"}
+                gql = """
+                query {
+                  streams(first: 6) {
+                    edges {
+                      node {
+                        id
+                        title
+                        viewersCount
+                        previewImageURL(width: 440, height: 248)
+                        broadcaster {
+                          displayName
+                          login
+                        }
+                        game {
+                          displayName
+                        }
+                      }
+                    }
+                  }
+                }
+                """
+                r = requests.post("https://gql.twitch.tv/gql", json={"query": gql}, headers=headers, verify=False, timeout=5)
+                if r.status_code == 200:
+                    data = r.json()
+                    for edge in data.get("data", {}).get("streams", {}).get("edges", []):
+                        n = edge.get("node", {})
+                        b = n.get("broadcaster", {})
+                        login = b.get("login", "")
+                        if not login:
+                            continue
+                        game_name = (n.get("game") or {}).get("displayName") or "Live Stream"
+                        viewers = n.get("viewersCount", 0)
+                        results.append({
+                            "platform": "Twitch",
+                            "title": n.get("title") or f"{b.get('displayName')} Live",
+                            "channel_or_studio": b.get("displayName", "Twitch Streamer"),
+                            "channel_type": "Streamer",
+                            "url": f"https://www.twitch.tv/{login}",
+                            "thumbnail": n.get("previewImageURL", ""),
+                            "duration": "LIVE",
+                            "views": viewers,
+                            "score": f"👁 {viewers:,} viewers",
+                            "is_live": True,
+                            "year": None,
+                            "episodes": f"Game: {game_name}",
+                            "genres": ["Live", game_name],
+                            "category": game_name,
+                            "description": f"Streaming {game_name} live on Twitch with {viewers:,} viewers",
+                            "downloadable": True,
+                            "platform_url": f"https://www.twitch.tv/{login}"
+                        })
+            except Exception as e:
+                pass
+
+        # 2. YouTube Live streams using official Live filter
+        cat_queries = {
+            "news": "news live",
+            "gaming": "gaming live stream",
+            "music": "lofi hip hop 24/7 live beats",
+            "podcasts": "podcast live stream",
+            "all": "live stream news gaming lofi"
+        }
+        search_q = query.strip() if query.strip() else cat_queries.get(category, "live stream")
+        yt_filter_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(search_q)}&sp=EgJAAQ%3D%3D"
+
+        try:
+            ydl_opts = {
+                "quiet": True,
+                "extract_flat": True,
+                "no_warnings": True,
+                "nocheckcertificate": True,
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                res = ydl.extract_info(yt_filter_url, download=False)
+
+            for item in res.get("entries", [])[:max_results]:
+                ch_name = item.get("uploader") or item.get("channel") or "YouTube Live"
+                v_url = item.get("url") or item.get("webpage_url") or f"https://www.youtube.com/watch?v={item.get('id')}"
+                thumb = item.get("thumbnail") or (item.get("thumbnails")[-1].get("url") if item.get("thumbnails") else "")
+                views = item.get("view_count") or 0
+                views_str = f"👁 {views:,} watching" if views else "🔴 Live Now"
+
+                results.append({
+                    "platform": "YouTube Live",
+                    "title": item.get("title", "Live Stream"),
+                    "channel_or_studio": ch_name,
+                    "channel_type": "Live Channel",
+                    "url": v_url,
+                    "thumbnail": thumb or "",
+                    "duration": "LIVE",
+                    "views": views,
+                    "score": views_str,
+                    "is_live": True,
+                    "year": None,
+                    "episodes": "🔴 LIVE STREAM",
+                    "genres": ["Live Stream"],
+                    "category": "Live Stream",
+                    "description": f"Broadcasting live on YouTube | {views_str}",
+                    "downloadable": True,
+                    "platform_url": v_url
+                })
+        except Exception as e:
+            pass
+
+        return results[:max_results]
+
+    @classmethod
+    def ai_smart_search(cls, query, platform="All", max_total=18):
         query = query.strip()
         if not query:
             return []
@@ -382,6 +639,15 @@ class AISearchEngine:
         if "youtube" in p_lower:
             return cls.search_youtube(query, max_results=max_total)
             
+        elif "show" in p_lower:
+            return cls.search_shows(query, max_results=max_total)
+
+        elif "live" in p_lower:
+            return cls.search_livestreams(query=query, max_results=max_total)
+
+        elif "twitch" in p_lower:
+            return cls.search_livestreams(query=query, category="twitch", max_results=max_total)
+
         elif "anime" in p_lower or "crunchyroll" in p_lower:
             anime_res = cls.search_anime(query, max_results=8)
             yt_trailers = cls.search_youtube(f"{query} anime trailer episode", max_results=4)
@@ -402,11 +668,25 @@ class AISearchEngine:
             return prime_res + yt_trailers
         
         # Universal Smart AI Search across all sources
-        is_anime_intent = any(k in query.lower() for k in ["anime", "studio", "mappa", "ufotable", "toei", "bones", "madhouse", "cloverworks", "wit", "shonen", "manga", "jujutsu", "demon slayer", "naruto", "attack on titan", "one piece", "bleach"])
-        
+        q_lower = query.lower()
+        is_live_intent = any(k in q_lower for k in ["live", "stream", "streaming", "broadcast", "24/7", "twitch"])
+        is_show_intent = any(k in q_lower for k in ["show", "series", "season", "episode", "tv show", "hbo", "netflix", "drama"])
+        is_anime_intent = any(k in q_lower for k in ["anime", "studio", "mappa", "ufotable", "toei", "bones", "madhouse", "cloverworks", "wit", "shonen", "manga"])
+
+        if is_live_intent:
+            live_items = cls.search_livestreams(query=query, max_results=8)
+            yt_items = cls.search_youtube(query, max_results=6)
+            return (live_items + yt_items)[:max_total]
+
+        if is_show_intent:
+            show_items = cls.search_shows(query, max_results=8)
+            yt_items = cls.search_youtube(query, max_results=6)
+            return (show_items + yt_items)[:max_total]
+
         anime_items = cls.search_anime(query, max_results=4)
-        tv_items = cls.search_shows_and_movies(query, max_results=4)
+        tv_items = cls.search_shows(query, max_results=4)
         yt_items = cls.search_youtube(query, max_results=6)
+        live_items = cls.search_livestreams(query=query, max_results=3)
         
         if is_anime_intent and anime_items:
             results.extend(anime_items)
@@ -414,8 +694,9 @@ class AISearchEngine:
             results.extend(tv_items)
         else:
             results.extend(yt_items)
-            results.extend(anime_items)
             results.extend(tv_items)
+            results.extend(live_items)
+            results.extend(anime_items)
             
         return results[:max_total]
 
@@ -427,7 +708,8 @@ class QueueItem:
     """Represents a single downloadable item in the queue with Pause, Resume, and Retry state."""
     def __init__(self, url, title=None, mode="video", quality="Best Available (Max 4K/8K)",
                  cookie_source="Auto Detect Browser", subtitles=False, save_folder="",
-                 channel_or_studio="", platform="Web"):
+                 channel_or_studio="", platform="Web", is_live=False, live_from_start=False,
+                 show_info=None):
         self.id = str(uuid.uuid4())
         self.url = url
         self.title = title or url
@@ -440,6 +722,13 @@ class QueueItem:
         self.platform = platform
         self.thumbnail_url = ""
         self.final_filepath = ""
+
+        # Shows & Live Streams Extensions
+        self.is_live = is_live
+        self.live_from_start = live_from_start
+        self.show_info = show_info or {}
+        self.finish_recording = False
+        self.recording_start_time = 0
         
         # Lifecycle States: QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELLED
         self.status = "QUEUED"
@@ -457,21 +746,30 @@ class QueueItem:
         self.thread = None
         self.card_widget = None
 
+    def finish(self):
+        """Signal live stream recording to cleanly finalize."""
+        self.finish_recording = True
+
     def pause(self):
         if self.status == "DOWNLOADING":
-            self.is_paused = True
-            self.status = "PAUSED"
+            if self.is_live:
+                self.finish()
+            else:
+                self.is_paused = True
+                self.status = "PAUSED"
 
     def resume(self):
         if self.status in ["PAUSED", "FAILED", "CANCELLED"]:
             self.is_paused = False
             self.is_cancelled = False
+            self.finish_recording = False
             self.error_message = ""
             self.status = "QUEUED"
 
     def retry(self):
         self.is_paused = False
         self.is_cancelled = False
+        self.finish_recording = False
         self.error_message = ""
         self.status = "QUEUED"
 
@@ -490,7 +788,7 @@ class DownloaderApp(ctk.CTk):
         self.settings = load_settings()
         ctk.set_appearance_mode(self.settings.get("theme", "Dark"))
 
-        self.title(f"{APP_NAME} {APP_VERSION} - Queue Manager & AI Multi-Platform Discovery")
+        self.title(f"{APP_NAME} {APP_VERSION} - TV Shows, Live Streams, Queue Manager & AI Discovery")
         self.geometry("1240x820")
         self.minsize(1020, 720)
 
@@ -514,6 +812,12 @@ class DownloaderApp(ctk.CTk):
         self.single_download_thread = None
         self.single_last_progress_time = 0
         self.single_last_downloaded_bytes = 0
+
+        # Shows & Live Streams State
+        self.current_is_live = False
+        self.single_is_recording_live = False
+        self.single_finish_recording = False
+        self.single_rec_start_time = 0
 
         # Queue Engine State
         self.queue_items = []
@@ -632,16 +936,20 @@ class DownloaderApp(ctk.CTk):
         )
         self.tabview.grid(row=1, column=0, sticky="nsew", padx=15, pady=(5, 15))
 
-        self.tab_downloader = self.tabview.add(" 📥 Single Downloader ")
-        self.tab_queue = self.tabview.add(" 📑 Download Queue ")
-        self.tab_ai_search = self.tabview.add(" 🤖 AI Video Discovery ")
-        self.tab_history = self.tabview.add(" 📜 Download History ")
-        self.tab_settings = self.tabview.add(" ⚙ Settings & Updates ")
+        self.tab_downloader = self.tabview.add(" 📥 Downloader ")
+        self.tab_queue = self.tabview.add(" 📑 Queue ")
+        self.tab_ai_search = self.tabview.add(" 🤖 AI Discovery ")
+        self.tab_shows = self.tabview.add(" 📺 TV Shows ")
+        self.tab_livestreams = self.tabview.add(" 🔴 Live Streams ")
+        self.tab_history = self.tabview.add(" 📜 History ")
+        self.tab_settings = self.tabview.add(" ⚙ Settings ")
 
         # Build Individual Tabs
         self.build_downloader_tab()
         self.build_queue_tab()
         self.build_ai_search_tab()
+        self.build_shows_tab()
+        self.build_livestreams_tab()
         self.build_history_tab()
         self.build_settings_tab()
 
@@ -812,6 +1120,18 @@ class DownloaderApp(ctk.CTk):
         )
         self.subtitles_chk.pack(anchor="w", padx=15, pady=4)
 
+        # Live Stream Options Frame (Auto-shown when a livestream is detected)
+        self.live_options_frame = ctk.CTkFrame(options_card, fg_color="#24141A", corner_radius=8, border_width=1, border_color="#DC2626")
+        self.live_dvr_chk_var = ctk.BooleanVar(value=True)
+        self.live_dvr_chk = ctk.CTkCheckBox(
+            self.live_options_frame,
+            text="🔴 Record from Start (Live DVR / --live-from-start)",
+            variable=self.live_dvr_chk_var,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#DC2626"
+        )
+        self.live_dvr_chk.pack(anchor="w", padx=12, pady=6)
+
         # Save Folder Selector
         folder_label = ctk.CTkLabel(options_card, text="Save Directory:", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT_MUTED)
         folder_label.pack(anchor="w", padx=15, pady=(8, 2))
@@ -980,22 +1300,55 @@ class DownloaderApp(ctk.CTk):
             self.url_entry.delete(0, tk.END)
             self.url_entry.insert(0, webpage_url)
 
-        if duration_sec:
-            mins, secs = divmod(int(duration_sec), 60)
-            hrs, mins = divmod(mins, 60)
-            duration_str = f"{hrs:02d}:{mins:02d}:{secs:02d}" if hrs else f"{mins:02d}:{secs:02d}"
+        # Detect if item is a live stream
+        is_live = info.get("is_live") or (info.get("live_status") in ["is_live", "live"])
+        self.current_is_live = bool(is_live)
+
+        if self.current_is_live:
+            duration_str = "🔴 LIVE BROADCAST"
+            try:
+                self.live_options_frame.pack(fill="x", padx=15, pady=4, after=self.subtitles_chk)
+            except Exception:
+                self.live_options_frame.pack(fill="x", padx=15, pady=4)
+            self.download_btn.configure(text="🔴 RECORD LIVE STREAM", fg_color="#DC2626", hover_color="#B91C1C")
+            self.status_label.configure(text="Status: 🔴 Live Stream Ready to Record")
         else:
-            duration_str = "N/A"
+            self.live_options_frame.pack_forget()
+            self.download_btn.configure(text="⬇ START NOW", fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER)
+            if duration_sec:
+                mins, secs = divmod(int(duration_sec), 60)
+                hrs, mins = divmod(mins, 60)
+                duration_str = f"{hrs:02d}:{mins:02d}:{secs:02d}" if hrs else f"{mins:02d}:{secs:02d}"
+            else:
+                duration_str = "N/A"
+            self.status_label.configure(text="Status: Ready to Download or Add to Queue")
             
         views_str = f"{views:,}" if views else "N/A"
 
         self.video_title_label.configure(text=title)
         self.video_details_label.configure(text=f"Channel/Studio: {uploader}  |  Duration: {duration_str}  |  Views: {views_str}")
-        self.status_label.configure(text="Status: Ready to Download or Add to Queue")
 
         thumbnail_url = info.get("thumbnail")
         if thumbnail_url:
             threading.Thread(target=self.load_thumbnail_image, args=(thumbnail_url,), daemon=True).start()
+
+        # Handle series / playlist batch detection
+        if "entries" in info and len(info["entries"]) > 1:
+            total_items = len(info["entries"])
+            if messagebox.askyesno("Series / Playlist Detected", f"This link contains a series or playlist with {total_items} items.\n\nWould you like to batch-add all {total_items} items to the Download Queue now?"):
+                folder = self.folder_entry.get().strip() or self.save_folder
+                mode = self.format_mode_var.get()
+                quality = self.quality_var.get()
+                cookie = self.cookie_var.get()
+                subs = self.subtitles_var.get()
+                for e in info["entries"]:
+                    e_title = e.get("title") or "Item"
+                    e_url = e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={e.get('id')}"
+                    item = QueueItem(url=e_url, title=e_title, mode=mode, quality=quality, cookie_source=cookie, subtitles=subs, save_folder=folder, channel_or_studio=uploader, platform="Playlist / Series")
+                    with self.queue_lock:
+                        self.queue_items.append(item)
+                self.render_queue_list()
+                self.tabview.set(" 📑 Queue ")
 
     def load_thumbnail_image(self, url):
         try:
@@ -1015,15 +1368,26 @@ class DownloaderApp(ctk.CTk):
             return
 
         if self.is_single_downloading:
-            messagebox.showinfo("In Progress", "A single download is already active.")
+            messagebox.showinfo("In Progress", "A download or live recording is already active.")
             return
 
         self.is_single_downloading = True
         self.single_cancel_requested = False
+        self.single_download_btn_prev_text = self.download_btn.cget("text")
         self.download_btn.configure(state="disabled", fg_color="#3A3F4E")
-        self.cancel_btn.configure(state="normal", fg_color="#E53935")
         self.progress_bar.set(0)
-        self.status_label.configure(text="Status: Starting download...")
+
+        if self.current_is_live:
+            self.single_is_recording_live = True
+            self.single_finish_recording = False
+            self.single_rec_start_time = time.time()
+            self.cancel_btn.configure(text="⏹ Finish & Save", state="normal", fg_color="#059669", hover_color="#047857", text_color="#FFFFFF")
+            self.status_label.configure(text="Status: 🔴 Starting live recording...")
+        else:
+            self.single_is_recording_live = False
+            self.single_finish_recording = False
+            self.cancel_btn.configure(text="✖ Stop", state="normal", fg_color="#E53935", hover_color="#C62828", text_color="#FFFFFF")
+            self.status_label.configure(text="Status: Starting download...")
 
         self.single_last_progress_time = time.time()
         self.single_last_downloaded_bytes = 0
@@ -1055,11 +1419,20 @@ class DownloaderApp(ctk.CTk):
                     h, m = divmod(m, 60)
                     eta_str = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
-            pct = (downloaded / total) if total > 0 else 0
-            down_mb = downloaded / (1024 * 1024)
-            total_mb = total / (1024 * 1024)
-            detail_txt = f"{pct*100:.1f}% | {speed_str} | ETA: {eta_str} | ({down_mb:.1f} MB / {total_mb:.1f} MB)"
-            self.after(0, lambda: self.update_single_progress(pct, detail_txt, "Downloading..."))
+            if self.single_is_recording_live:
+                rec_elapsed = now - self.single_rec_start_time
+                hrs, rem = divmod(int(rec_elapsed), 3600)
+                mins, secs = divmod(rem, 60)
+                rec_str = f"{hrs:02d}:{mins:02d}:{secs:02d}"
+                down_mb = downloaded / (1024 * 1024)
+                detail_txt = f"🔴 RECORDING LIVE | {down_mb:.1f} MB | {speed_str} | REC TIME: {rec_str}"
+                self.after(0, lambda: self.update_single_progress(0.5, detail_txt, "🔴 Live Stream Recording Active..."))
+            else:
+                pct = (downloaded / total) if total > 0 else 0
+                down_mb = downloaded / (1024 * 1024)
+                total_mb = total / (1024 * 1024)
+                detail_txt = f"{pct*100:.1f}% | {speed_str} | ETA: {eta_str} | ({down_mb:.1f} MB / {total_mb:.1f} MB)"
+                self.after(0, lambda: self.update_single_progress(pct, detail_txt, "Downloading..."))
             
         elif d['status'] == 'finished':
             self.after(0, lambda: self.update_single_progress(1.0, "Merging media files...", "Finalizing..."))
@@ -1091,6 +1464,11 @@ class DownloaderApp(ctk.CTk):
             'nopart': False
         }
 
+        if self.single_is_recording_live:
+            if hasattr(self, 'live_dvr_chk_var') and self.live_dvr_chk_var.get():
+                ydl_opts['live_from_start'] = True
+            ydl_opts['hls_use_mpegts'] = True
+
         apply_cookie_and_bypass_opts(ydl_opts, cookie_choice)
 
         if mode == "audio":
@@ -1117,14 +1495,16 @@ class DownloaderApp(ctk.CTk):
             ydl_opts['subtitlesformat'] = 'srt'
             ydl_opts['embedsubtitles'] = True
 
+        info = None
+        filepath = ""
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(target_url, download=True)
                 if "entries" in info and info["entries"]:
                     info = info["entries"][0]
             
-            title = info.get("title", "Video Download")
-            filepath = ydl.prepare_filename(info)
+            title = info.get("title", "Video Download") if info else "Video Download"
+            filepath = ydl.prepare_filename(info) if info else ""
             if mode == "audio":
                 filepath = os.path.splitext(filepath)[0] + "." + ext
             elif mode == "video" and not filepath.endswith(".mp4"):
@@ -1133,20 +1513,37 @@ class DownloaderApp(ctk.CTk):
             self.save_to_history(title, query, filepath, quality_choice)
             self.after(0, lambda: self.handle_single_download_success(title))
         except yt_dlp.utils.DownloadCancelled:
-            self.after(0, self.handle_single_download_cancelled)
+            if self.single_is_recording_live and self.single_finish_recording:
+                # User intentionally stopped live recording - cleanly remux partial file
+                title = info.get("title", "Live Stream Recording") if info else "Live Stream Recording"
+                if not filepath:
+                    filepath = os.path.join(out_folder, f"{title}.mp4")
+                part_file = filepath + ".part"
+                finalize_livestream_file(part_file, filepath)
+                self.save_to_history(f"[Live Recording] {title}", query, filepath, quality_choice)
+                self.after(0, lambda: self.handle_single_download_success(f"[Live Recording] {title}"))
+            else:
+                self.after(0, self.handle_single_download_cancelled)
         except Exception as e:
             err = str(e)
             self.after(0, lambda: self.handle_single_download_error(err))
 
     def cancel_single_download(self):
         if self.is_single_downloading:
-            self.single_cancel_requested = True
-            self.status_label.configure(text="Status: Cancelling download...")
+            if self.single_is_recording_live:
+                self.single_finish_recording = True
+                self.single_cancel_requested = True
+                self.status_label.configure(text="Status: Finalizing & saving live recording...")
+            else:
+                self.single_cancel_requested = True
+                self.status_label.configure(text="Status: Cancelling download...")
 
     def handle_single_download_success(self, title):
         self.is_single_downloading = False
-        self.download_btn.configure(state="normal", fg_color=COLOR_ACCENT)
-        self.cancel_btn.configure(state="disabled", fg_color="#3A2025")
+        btn_txt = "🔴 RECORD LIVE STREAM" if getattr(self, 'current_is_live', False) else "⬇ START NOW"
+        btn_clr = "#DC2626" if getattr(self, 'current_is_live', False) else COLOR_ACCENT
+        self.download_btn.configure(state="normal", text=btn_txt, fg_color=btn_clr)
+        self.cancel_btn.configure(state="disabled", text="✖ Stop", fg_color="#3A2025", text_color="#FF6B6B")
         self.progress_bar.set(1.0)
         self.status_label.configure(text="Status: Download Complete! 🎉")
         self.details_label.configure(text=f"Saved: {title[:50]}")
@@ -1154,16 +1551,20 @@ class DownloaderApp(ctk.CTk):
 
     def handle_single_download_cancelled(self):
         self.is_single_downloading = False
-        self.download_btn.configure(state="normal", fg_color=COLOR_ACCENT)
-        self.cancel_btn.configure(state="disabled", fg_color="#3A2025")
+        btn_txt = "🔴 RECORD LIVE STREAM" if getattr(self, 'current_is_live', False) else "⬇ START NOW"
+        btn_clr = "#DC2626" if getattr(self, 'current_is_live', False) else COLOR_ACCENT
+        self.download_btn.configure(state="normal", text=btn_txt, fg_color=btn_clr)
+        self.cancel_btn.configure(state="disabled", text="✖ Stop", fg_color="#3A2025", text_color="#FF6B6B")
         self.progress_bar.set(0)
         self.status_label.configure(text="Status: Download Cancelled")
         self.details_label.configure(text="Cancelled by user.")
 
     def handle_single_download_error(self, error):
         self.is_single_downloading = False
-        self.download_btn.configure(state="normal", fg_color=COLOR_ACCENT)
-        self.cancel_btn.configure(state="disabled", fg_color="#3A2025")
+        btn_txt = "🔴 RECORD LIVE STREAM" if getattr(self, 'current_is_live', False) else "⬇ START NOW"
+        btn_clr = "#DC2626" if getattr(self, 'current_is_live', False) else COLOR_ACCENT
+        self.download_btn.configure(state="normal", text=btn_txt, fg_color=btn_clr)
+        self.cancel_btn.configure(state="disabled", text="✖ Stop", fg_color="#3A2025", text_color="#FF6B6B")
         self.status_label.configure(text="Status: Download Failed")
         self.details_label.configure(text="Error occurred.")
         messagebox.showerror("Download Error", f"An error occurred while downloading:\n\n{error}")
@@ -1183,6 +1584,8 @@ class DownloaderApp(ctk.CTk):
         cookie = self.cookie_var.get()
         subs = self.subtitles_var.get()
         folder = self.folder_entry.get().strip() or self.save_folder
+        is_live = getattr(self, 'current_is_live', False)
+        live_dvr = self.live_dvr_chk_var.get() if hasattr(self, 'live_dvr_chk_var') else False
 
         item = QueueItem(
             url=url,
@@ -1192,13 +1595,15 @@ class DownloaderApp(ctk.CTk):
             cookie_source=cookie,
             subtitles=subs,
             save_folder=folder,
-            channel_or_studio="Single Downloader",
-            platform="Web"
+            channel_or_studio="Live Broadcast" if is_live else "Single Downloader",
+            platform="Live Stream" if is_live else "Web",
+            is_live=is_live,
+            live_from_start=live_dvr
         )
         
         self.add_queue_item(item)
         messagebox.showinfo("Queue", f"Added to Download Queue:\n\n'{title[:60]}'")
-        self.tabview.set(" 📑 Download Queue ")
+        self.tabview.set(" 📑 Queue ")
 
 
     # ==========================================
@@ -1430,7 +1835,7 @@ class DownloaderApp(ctk.CTk):
         thumb_box.grid(row=0, column=0, padx=12, pady=12, sticky="ns")
         thumb_box.pack_propagate(False)
 
-        icon_char = "🎬" if item.mode == "video" else "🎵"
+        icon_char = "🔴" if item.is_live else ("🎬" if item.mode == "video" else "🎵")
         thumb_lbl = ctk.CTkLabel(thumb_box, text=icon_char, font=ctk.CTkFont(size=24))
         thumb_lbl.pack(expand=True)
 
@@ -1453,7 +1858,11 @@ class DownloaderApp(ctk.CTk):
 
         # Color-coded Status Badge
         badge_color = "#3A3F4E"
-        if item.status == "QUEUED": badge_color = "#D97706"
+        status_text = f" {item.status} "
+        if item.is_live and item.status == "DOWNLOADING":
+            badge_color = "#DC2626"
+            status_text = " 🔴 LIVE REC "
+        elif item.status == "QUEUED": badge_color = "#D97706"
         elif item.status == "DOWNLOADING": badge_color = COLOR_ACCENT
         elif item.status == "PAUSED": badge_color = "#B45309"
         elif item.status == "COMPLETED": badge_color = COLOR_SUCCESS
@@ -1462,7 +1871,7 @@ class DownloaderApp(ctk.CTk):
 
         status_badge = ctk.CTkLabel(
             title_row,
-            text=f" {item.status} ",
+            text=status_text,
             font=ctk.CTkFont(size=10, weight="bold"),
             fg_color=badge_color,
             text_color="#FFFFFF",
@@ -1501,8 +1910,12 @@ class DownloaderApp(ctk.CTk):
         btn_f.grid(row=0, column=2, padx=12, pady=10, sticky="e")
 
         if item.status == "DOWNLOADING":
-            pause_btn = ctk.CTkButton(btn_f, text="⏸ Pause", width=70, height=30, fg_color="#D97706", hover_color="#B45309", font=ctk.CTkFont(size=11, weight="bold"), command=lambda it=item: self.pause_queue_item(it))
-            pause_btn.pack(side="left", padx=3)
+            if item.is_live:
+                finish_btn = ctk.CTkButton(btn_f, text="⏹ Finish", width=75, height=30, fg_color="#059669", hover_color="#047857", font=ctk.CTkFont(size=11, weight="bold"), command=lambda it=item: self.finish_queue_live_item(it))
+                finish_btn.pack(side="left", padx=3)
+            else:
+                pause_btn = ctk.CTkButton(btn_f, text="⏸ Pause", width=70, height=30, fg_color="#D97706", hover_color="#B45309", font=ctk.CTkFont(size=11, weight="bold"), command=lambda it=item: self.pause_queue_item(it))
+                pause_btn.pack(side="left", padx=3)
             cancel_btn = ctk.CTkButton(btn_f, text="✖ Stop", width=65, height=30, fg_color="#3A2025", hover_color="#5A252D", text_color="#FF6B6B", font=ctk.CTkFont(size=11, weight="bold"), command=lambda it=item: self.cancel_queue_item(it))
             cancel_btn.pack(side="left", padx=3)
 
@@ -1530,6 +1943,9 @@ class DownloaderApp(ctk.CTk):
             del_btn.pack(side="left", padx=3)
 
         return card
+
+    def finish_queue_live_item(self, item):
+        item.finish()
 
     def pause_queue_item(self, item):
         item.pause()
@@ -1621,11 +2037,16 @@ class DownloaderApp(ctk.CTk):
         if is_valid_url(query) and not query.startswith(('http://', 'https://')):
             target_url = f"https://{query}"
 
+        if item.is_live:
+            item.recording_start_time = time.time()
+
         def item_progress_hook(d):
             if item.is_paused:
                 raise DownloadPausedException("Paused by user")
             if item.is_cancelled:
                 raise yt_dlp.utils.DownloadCancelled("Cancelled by user")
+            if item.finish_recording:
+                raise yt_dlp.utils.DownloadCancelled("Finished recording by user")
 
             if d['status'] == 'downloading':
                 total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
@@ -1645,7 +2066,15 @@ class DownloaderApp(ctk.CTk):
                         h, m = divmod(m, 60)
                         item.eta_str = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
-                item.progress = (downloaded / total) if total > 0 else 0
+                if item.is_live:
+                    rec_elapsed = now - item.recording_start_time
+                    hrs, rem = divmod(int(rec_elapsed), 3600)
+                    mins, secs = divmod(rem, 60)
+                    item.eta_str = f"REC: {hrs:02d}:{mins:02d}:{secs:02d}"
+                    item.progress = 0.5
+                else:
+                    item.progress = (downloaded / total) if total > 0 else 0
+
                 item.downloaded_bytes = downloaded
                 item.total_bytes = total
                 
@@ -1661,6 +2090,11 @@ class DownloaderApp(ctk.CTk):
             'continuedl': True,
             'nopart': False
         }
+
+        if item.is_live:
+            if item.live_from_start:
+                ydl_opts['live_from_start'] = True
+            ydl_opts['hls_use_mpegts'] = True
 
         apply_cookie_and_bypass_opts(ydl_opts, cookie_choice)
 
@@ -1688,14 +2122,16 @@ class DownloaderApp(ctk.CTk):
             ydl_opts['subtitlesformat'] = 'srt'
             ydl_opts['embedsubtitles'] = True
 
+        info = None
+        filepath = ""
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(target_url, download=True)
                 if "entries" in info and info["entries"]:
                     info = info["entries"][0]
             
-            title = info.get("title", item.title)
-            filepath = ydl.prepare_filename(info)
+            title = info.get("title", item.title) if info else item.title
+            filepath = ydl.prepare_filename(info) if info else ""
             if mode == "audio":
                 filepath = os.path.splitext(filepath)[0] + "." + ext
             elif mode == "video" and not filepath.endswith(".mp4"):
@@ -1714,9 +2150,26 @@ class DownloaderApp(ctk.CTk):
             self.after(0, self.render_queue_list)
 
         except yt_dlp.utils.DownloadCancelled:
-            item.status = "CANCELLED"
-            item.speed_str = "0 MB/s"
-            self.after(0, self.render_queue_list)
+            if item.is_live and item.finish_recording:
+                # Live stream finished cleanly by user
+                title = info.get("title", item.title) if info else item.title
+                if not filepath:
+                    filepath = os.path.join(out_folder, f"{title}.mp4")
+                if not filepath.endswith(".mp4"):
+                    filepath = os.path.splitext(filepath)[0] + ".mp4"
+                
+                part_path = filepath + ".part"
+                finalize_livestream_file(part_path, filepath)
+                item.final_filepath = filepath
+                item.status = "COMPLETED"
+                item.progress = 1.0
+                item.speed_str = "0 MB/s"
+                self.save_to_history(f"[Live Recording] {title}", query, filepath, quality_choice)
+                self.after(0, self.render_queue_list)
+            else:
+                item.status = "CANCELLED"
+                item.speed_str = "0 MB/s"
+                self.after(0, self.render_queue_list)
 
         except Exception as e:
             item.status = "FAILED"
@@ -1776,6 +2229,8 @@ class DownloaderApp(ctk.CTk):
         platforms = [
             ("🌟 All Platforms", "All"),
             ("▶ YouTube", "YouTube"),
+            ("📺 TV Shows", "Shows"),
+            ("🔴 Live Streams", "Live"),
             ("🎌 Anime & Crunchyroll", "Anime"),
             ("🍿 Netflix", "Netflix"),
             ("📺 Prime Video", "Prime Video")
@@ -1807,7 +2262,7 @@ class DownloaderApp(ctk.CTk):
         # Initial Empty State
         self.ai_placeholder = ctk.CTkLabel(
             self.ai_results_scroll,
-            text="Explore videos from YouTube, Netflix, Crunchyroll, Prime Video & Anime Studios.\n\nType any query or prompt above to see rich cards with Channel names, Studio names, and 1-Click Queueing.",
+            text="Explore videos from YouTube, Live Streams, TV Shows, Netflix, Crunchyroll & Anime Studios.\n\nType any query or prompt above to see rich cards with Channel names, Studio names, and 1-Click Queueing.",
             font=ctk.CTkFont(size=13),
             text_color=COLOR_TEXT_MUTED
         )
@@ -1869,6 +2324,9 @@ class DownloaderApp(ctk.CTk):
         if "Anime" in plat or "Crunchyroll" in plat: p_color = COLOR_PURPLE
         elif "Netflix" in plat: p_color = "#E50914"
         elif "Prime" in plat: p_color = "#00A8E1"
+        elif "TV Shows" in plat: p_color = "#0284C7"
+        elif "Live" in plat or item.get("is_live"): p_color = "#DC2626"
+        elif "Twitch" in plat: p_color = "#9146FF"
 
         # Left Column: Platform Badge / Thumbnail preview
         thumb_f = ctk.CTkFrame(card, fg_color="#12131A", width=120, height=85, corner_radius=8)
@@ -1885,7 +2343,7 @@ class DownloaderApp(ctk.CTk):
         )
         badge_lbl.pack(anchor="nw", padx=6, pady=6)
 
-        t_icon = "🎬" if item.get("downloadable") else "🎌"
+        t_icon = "🔴" if item.get("is_live") else ("📺" if item.get("is_show") else ("🎬" if item.get("downloadable") else "🎌"))
         icon_lbl = ctk.CTkLabel(thumb_f, text=t_icon, font=ctk.CTkFont(size=22))
         icon_lbl.pack(expand=True)
 
@@ -1910,6 +2368,10 @@ class DownloaderApp(ctk.CTk):
         meta_parts = []
         if "Studio" in channel_type:
             meta_parts.append(f"🎨 Studio: {studio_or_channel}")
+        elif "Streamer" in channel_type:
+            meta_parts.append(f"🎙 Streamer: {studio_or_channel}")
+        elif "Network" in channel_type:
+            meta_parts.append(f"📺 Network: {studio_or_channel}")
         else:
             meta_parts.append(f"👤 Channel: {studio_or_channel}")
 
@@ -1938,7 +2400,81 @@ class DownloaderApp(ctk.CTk):
         btn_f = ctk.CTkFrame(card, fg_color="transparent")
         btn_f.grid(row=0, column=2, padx=12, pady=10, sticky="e")
 
-        if item.get("downloadable") or item.get("platform") == "YouTube":
+        if item.get("is_live"):
+            rec_btn = ctk.CTkButton(
+                btn_f,
+                text="🔴 Record Stream",
+                width=115,
+                height=32,
+                fg_color="#DC2626",
+                hover_color="#B91C1C",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda it=item: self.record_ai_live_item(it)
+            )
+            rec_btn.pack(side="left", padx=3)
+
+            q_add_btn = ctk.CTkButton(
+                btn_f,
+                text="➕ Queue",
+                width=80,
+                height=32,
+                fg_color="#1E3A8A",
+                hover_color="#1D4ED8",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda it=item: self.add_ai_item_to_queue(it)
+            )
+            q_add_btn.pack(side="left", padx=3)
+
+            watch_btn = ctk.CTkButton(
+                btn_f,
+                text="🌐 Watch",
+                width=75,
+                height=32,
+                fg_color=p_color,
+                hover_color="#3A3F4E",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda u=item.get("platform_url"): self.open_browser_url(u)
+            )
+            watch_btn.pack(side="left", padx=3)
+
+        elif item.get("is_show"):
+            ep_btn = ctk.CTkButton(
+                btn_f,
+                text="📋 Episodes",
+                width=100,
+                height=32,
+                fg_color="#0284C7",
+                hover_color="#0369A1",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda it=item: self.open_episode_explorer(it)
+            )
+            ep_btn.pack(side="left", padx=3)
+
+            q_add_btn = ctk.CTkButton(
+                btn_f,
+                text="➕ Queue Best",
+                width=100,
+                height=32,
+                fg_color="#1E3A8A",
+                hover_color="#1D4ED8",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda it=item: self.add_ai_item_to_queue(it)
+            )
+            q_add_btn.pack(side="left", padx=3)
+
+            watch_btn = ctk.CTkButton(
+                btn_f,
+                text="🌐 Stream",
+                width=75,
+                height=32,
+                fg_color="#2B2F3A",
+                hover_color="#3A3F4E",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda u=item.get("platform_url"): self.open_browser_url(u)
+            )
+            watch_btn.pack(side="left", padx=3)
+
+        elif item.get("downloadable") or item.get("platform") == "YouTube":
             q_add_btn = ctk.CTkButton(
                 btn_f,
                 text="➕ Add to Queue",
@@ -1964,7 +2500,7 @@ class DownloaderApp(ctk.CTk):
             dl_now_btn.pack(side="left", padx=3)
 
         else:
-            # Anime / Netflix / Prime / Series actions
+            # Anime / Netflix / Prime actions
             q_add_btn = ctk.CTkButton(
                 btn_f,
                 text="➕ Queue Best Video",
@@ -2003,15 +2539,23 @@ class DownloaderApp(ctk.CTk):
 
         return card
 
+    def record_ai_live_item(self, item):
+        self.tabview.set(" 📥 Downloader ")
+        url = item.get("url")
+        self.url_entry.delete(0, tk.END)
+        self.url_entry.insert(0, url)
+        self.start_fetch_info_thread()
+
     def add_ai_item_to_queue(self, item):
         target_url = item.get("url")
         title = item.get("title", "Video")
         channel_or_studio = item.get("channel_or_studio", "")
         platform = item.get("platform", "Web")
+        is_live = bool(item.get("is_live"))
         
         # If anime or non-direct stream, search and queue best available official video / trailer
         if not item.get("downloadable") and platform != "YouTube":
-            search_q = item.get("search_query") or f"{title} anime trailer"
+            search_q = item.get("search_query") or f"{title} trailer"
             target_url = f"ytsearch1:{search_q}"
 
         q_item = QueueItem(
@@ -2023,15 +2567,17 @@ class DownloaderApp(ctk.CTk):
             subtitles=self.subtitles_var.get(),
             save_folder=self.folder_entry.get().strip() or self.save_folder,
             channel_or_studio=channel_or_studio,
-            platform=platform
+            platform=platform,
+            is_live=is_live,
+            live_from_start=True if is_live else False
         )
         
         self.add_queue_item(q_item)
         messagebox.showinfo("Queue", f"Added to Download Queue:\n\n'{title}'\nSource: {channel_or_studio} ({platform})")
-        self.tabview.set(" 📑 Download Queue ")
+        self.tabview.set(" 📑 Queue ")
 
     def select_ai_item_for_download(self, item):
-        self.tabview.set(" 📥 Single Downloader ")
+        self.tabview.set(" 📥 Downloader ")
         url = item.get("url")
         self.url_entry.delete(0, tk.END)
         self.url_entry.insert(0, url)
@@ -2046,6 +2592,1036 @@ class DownloaderApp(ctk.CTk):
         self.clipboard_clear()
         self.clipboard_append(text)
         messagebox.showinfo("Copied", "Link copied to clipboard!")
+
+
+    # ==========================================
+    # TAB: TV SHOWS & EPISODE EXPLORER
+    # ==========================================
+    def build_shows_tab(self):
+        tab = self.tab_shows
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(2, weight=1)
+
+        # Header Search Bar
+        search_card = ctk.CTkFrame(tab, fg_color=COLOR_CARD, corner_radius=12)
+        search_card.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
+        search_card.grid_columnconfigure(0, weight=1)
+
+        self.shows_search_entry = ctk.CTkEntry(
+            search_card,
+            placeholder_text="📺 Search TV series, anime seasons, web shows (e.g. Breaking Bad, Stranger Things, The Boys, Fallout)...",
+            font=ctk.CTkFont(size=13),
+            height=42
+        )
+        self.shows_search_entry.grid(row=0, column=0, padx=(15, 10), pady=12, sticky="ew")
+        self.shows_search_entry.bind("<Return>", lambda e: self.start_shows_search())
+
+        search_btn = ctk.CTkButton(
+            search_card,
+            text="🔍 Search Shows",
+            width=135,
+            height=42,
+            fg_color="#0284C7",
+            hover_color="#0369A1",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self.start_shows_search
+        )
+        search_btn.grid(row=0, column=1, padx=(0, 6), pady=12)
+
+        popular_btn = ctk.CTkButton(
+            search_card,
+            text="🔥 Popular Series",
+            width=135,
+            height=42,
+            fg_color="#D97706",
+            hover_color="#B45309",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self.load_popular_shows
+        )
+        popular_btn.grid(row=0, column=2, padx=(0, 15), pady=12)
+
+        # Filter Tag Chips Bar
+        chips_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        chips_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
+
+        tag_chips = [
+            ("🔥 Top Hits", ""),
+            ("🍿 Netflix", "Stranger Things"),
+            ("📺 HBO / Max", "Game of Thrones"),
+            ("🚀 Sci-Fi & Fantasy", "Fallout"),
+            ("🎭 Drama & Crime", "Breaking Bad"),
+            ("🦸 Superheroes", "The Boys"),
+            ("⚔ Anime Hits", "Arcane")
+        ]
+
+        for label, q_tag in tag_chips:
+            btn = ctk.CTkButton(
+                chips_frame,
+                text=label,
+                height=30,
+                corner_radius=15,
+                fg_color="#20232D",
+                hover_color="#2E3342",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda t=q_tag: self.filter_shows_by_tag(t)
+            )
+            btn.pack(side="left", padx=4)
+
+        # Results Scrollable Frame
+        self.shows_results_scroll = ctk.CTkScrollableFrame(
+            tab,
+            fg_color=COLOR_BG,
+            corner_radius=10,
+            label_text="TV Series & Web Shows Catalog",
+            label_font=ctk.CTkFont(size=14, weight="bold")
+        )
+        self.shows_results_scroll.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.shows_results_scroll.grid_columnconfigure(0, weight=1)
+
+        # Pre-load popular series asynchronously
+        self.after(200, self.load_popular_shows)
+
+    def filter_shows_by_tag(self, tag):
+        if not tag:
+            self.load_popular_shows()
+            return
+        self.shows_search_entry.delete(0, tk.END)
+        self.shows_search_entry.insert(0, tag)
+        self.start_shows_search(custom_query=tag)
+
+    def start_shows_search(self, custom_query=None):
+        query = custom_query if custom_query is not None else self.shows_search_entry.get().strip()
+        if not query:
+            return
+
+        for child in self.shows_results_scroll.winfo_children():
+            child.destroy()
+
+        loading_lbl = ctk.CTkLabel(
+            self.shows_results_scroll,
+            text=f"📺 Searching TV database for '{query}'...",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#38BDF8"
+        )
+        loading_lbl.pack(pady=50)
+
+        threading.Thread(target=self.shows_search_worker, args=(query,), daemon=True).start()
+
+    def shows_search_worker(self, query):
+        try:
+            results = AISearchEngine.search_shows(query, max_results=14)
+            self.after(0, lambda: self.render_shows_results(results))
+        except Exception as e:
+            err = str(e)
+            self.after(0, lambda: self.render_shows_error(err))
+
+    def load_popular_shows(self):
+        for child in self.shows_results_scroll.winfo_children():
+            child.destroy()
+
+        loading_lbl = ctk.CTkLabel(
+            self.shows_results_scroll,
+            text="🔥 Loading top curated television & web series...",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#F59E0B"
+        )
+        loading_lbl.pack(pady=50)
+
+        threading.Thread(target=self.popular_shows_worker, daemon=True).start()
+
+    def popular_shows_worker(self):
+        try:
+            results = AISearchEngine.get_popular_shows(count=12)
+            self.after(0, lambda: self.render_shows_results(results))
+        except Exception as e:
+            err = str(e)
+            self.after(0, lambda: self.render_shows_error(err))
+
+    def render_shows_error(self, err):
+        for child in self.shows_results_scroll.winfo_children():
+            child.destroy()
+        lbl = ctk.CTkLabel(self.shows_results_scroll, text=f"Shows search failed:\n{err}", text_color=COLOR_DANGER)
+        lbl.pack(pady=50)
+
+    def render_shows_results(self, results):
+        for child in self.shows_results_scroll.winfo_children():
+            child.destroy()
+
+        if not results:
+            lbl = ctk.CTkLabel(
+                self.shows_results_scroll,
+                text="No shows found for your search query.\nTry searching another title or click '🔥 Popular Series'.",
+                font=ctk.CTkFont(size=13),
+                text_color=COLOR_TEXT_MUTED
+            )
+            lbl.pack(pady=50)
+            return
+
+        for idx, item in enumerate(results):
+            card = self.create_show_card(idx, item)
+            card.pack(fill="x", padx=5, pady=6)
+
+    def create_show_card(self, idx, item):
+        card = ctk.CTkFrame(self.shows_results_scroll, fg_color=COLOR_CARD, corner_radius=10)
+        card.grid_columnconfigure(1, weight=1)
+
+        # Left Column: Network badge & show icon
+        thumb_f = ctk.CTkFrame(card, fg_color="#12131A", width=115, height=85, corner_radius=8)
+        thumb_f.grid(row=0, column=0, padx=12, pady=12, sticky="ns")
+        thumb_f.pack_propagate(False)
+
+        network_name = item.get("channel_or_studio") or "TV Network"
+        badge_lbl = ctk.CTkLabel(
+            thumb_f,
+            text=network_name[:14],
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#FFFFFF",
+            fg_color="#0284C7",
+            corner_radius=6
+        )
+        badge_lbl.pack(anchor="nw", padx=5, pady=5)
+
+        icon_lbl = ctk.CTkLabel(thumb_f, text="📺", font=ctk.CTkFont(size=22))
+        icon_lbl.pack(expand=True)
+
+        # Center Column: Metadata
+        info_f = ctk.CTkFrame(card, fg_color="transparent")
+        info_f.grid(row=0, column=1, padx=(0, 10), pady=10, sticky="ew")
+
+        title_lbl = ctk.CTkLabel(
+            info_f,
+            text=f"{idx+1}. {item.get('title', 'Unknown Show')}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+            justify="left"
+        )
+        title_lbl.pack(fill="x")
+
+        # Rich Details: Network, Year, Rating, Status, Genres
+        meta_parts = []
+        if network_name: meta_parts.append(f"Network: {network_name}")
+        if item.get("score") and item.get("score") != "N/A": meta_parts.append(item.get("score"))
+        if item.get("year") and item.get("year") != "N/A": meta_parts.append(f"Year: {item.get('year')}")
+        if item.get("status"): meta_parts.append(f"Status: {item.get('status')}")
+        genres = item.get("genres") or []
+        if genres: meta_parts.append(f"Genre: {', '.join(genres)}")
+
+        meta_line = "  |  ".join(meta_parts)
+        meta_lbl = ctk.CTkLabel(
+            info_f,
+            text=meta_line,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#38BDF8",
+            anchor="w"
+        )
+        meta_lbl.pack(fill="x", pady=(2, 2))
+
+        # Description
+        desc = item.get("description", "")
+        if desc:
+            desc_lbl = ctk.CTkLabel(
+                info_f,
+                text=desc[:180] + ("..." if len(desc) > 180 else ""),
+                font=ctk.CTkFont(size=10),
+                text_color="#8E92A2",
+                anchor="w",
+                justify="left"
+            )
+            desc_lbl.pack(fill="x")
+
+        # Right Column: Action Buttons
+        btn_f = ctk.CTkFrame(card, fg_color="transparent")
+        btn_f.grid(row=0, column=2, padx=12, pady=10, sticky="e")
+
+        ep_btn = ctk.CTkButton(
+            btn_f,
+            text="📋 Seasons & Episodes",
+            width=150,
+            height=34,
+            fg_color="#0284C7",
+            hover_color="#0369A1",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=lambda it=item: self.open_episode_explorer(it)
+        )
+        ep_btn.pack(side="left", padx=3)
+
+        q_btn = ctk.CTkButton(
+            btn_f,
+            text="➕ Queue Best",
+            width=100,
+            height=34,
+            fg_color="#1E3A8A",
+            hover_color="#1D4ED8",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=lambda it=item: self.add_ai_item_to_queue(it)
+        )
+        q_btn.pack(side="left", padx=3)
+
+        site_btn = ctk.CTkButton(
+            btn_f,
+            text="🌐 TV Page",
+            width=80,
+            height=34,
+            fg_color="#2B2F3A",
+            hover_color="#3A3F4E",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=lambda u=item.get("platform_url"): self.open_browser_url(u)
+        )
+        site_btn.pack(side="left", padx=3)
+
+        copy_btn = ctk.CTkButton(
+            btn_f,
+            text="🔗 Copy",
+            width=60,
+            height=34,
+            fg_color="#2B2F3A",
+            hover_color="#3A3F4E",
+            font=ctk.CTkFont(size=11),
+            command=lambda u=item.get("platform_url") or item.get("url"): self.copy_to_clipboard(u)
+        )
+        copy_btn.pack(side="left", padx=3)
+
+        return card
+
+    def open_episode_explorer(self, show_item):
+        """Interactive Season and Episode Explorer modal with 1-click batch queueing."""
+        show_title = show_item.get("title", "TV Show")
+        show_id = show_item.get("id")
+
+        modal = ctk.CTkToplevel(self)
+        modal.title(f"📺 {show_title} - Seasons & Episodes Explorer")
+        modal.geometry("840x660")
+        modal.minsize(680, 520)
+        modal.configure(fg_color=COLOR_BG)
+        modal.transient(self)
+        modal.lift()
+        modal.focus_force()
+
+        modal.grid_columnconfigure(0, weight=1)
+        modal.grid_rowconfigure(2, weight=1)
+
+        # Header Frame
+        header = ctk.CTkFrame(modal, fg_color=COLOR_CARD, corner_radius=10)
+        header.grid(row=0, column=0, sticky="ew", padx=12, pady=10)
+        header.grid_columnconfigure(0, weight=1)
+
+        h_title = ctk.CTkLabel(
+            header,
+            text=f"📺 {show_title}",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color="#FFFFFF"
+        )
+        h_title.grid(row=0, column=0, sticky="w", padx=15, pady=(10, 2))
+
+        net = show_item.get("channel_or_studio", "")
+        rating = show_item.get("score", "")
+        status = show_item.get("status", "")
+        sub_txt = f"Network: {net}   |   Rating: {rating}   |   Status: {status}"
+        h_sub = ctk.CTkLabel(
+            header,
+            text=sub_txt,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#38BDF8"
+        )
+        h_sub.grid(row=1, column=0, sticky="w", padx=15, pady=(0, 10))
+
+        # Controls Bar: Season Selector + Batch Queue Season Button
+        controls_bar = ctk.CTkFrame(modal, fg_color="#181A20", corner_radius=8)
+        controls_bar.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        controls_bar.grid_columnconfigure(1, weight=1)
+
+        s_lbl = ctk.CTkLabel(
+            controls_bar,
+            text="Select Season:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLOR_TEXT_MAIN
+        )
+        s_lbl.grid(row=0, column=0, padx=(15, 8), pady=10)
+
+        season_var = ctk.StringVar(value="Loading seasons...")
+        season_opt_menu = ctk.CTkOptionMenu(
+            controls_bar,
+            variable=season_var,
+            values=["Loading seasons..."],
+            width=220,
+            height=34,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        season_opt_menu.grid(row=0, column=1, sticky="w", padx=(0, 10), pady=10)
+
+        queue_season_btn = ctk.CTkButton(
+            controls_bar,
+            text="➕ Queue Entire Season",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#059669",
+            hover_color="#047857",
+            height=34,
+            state="disabled"
+        )
+        queue_season_btn.grid(row=0, column=2, padx=15, pady=10)
+
+        # Episodes Scrollable Frame
+        episodes_scroll = ctk.CTkScrollableFrame(
+            modal,
+            fg_color="#12131A",
+            corner_radius=10,
+            label_text="Episodes in Season",
+            label_font=ctk.CTkFont(size=13, weight="bold")
+        )
+        episodes_scroll.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        episodes_scroll.grid_columnconfigure(0, weight=1)
+
+        loading_lbl = ctk.CTkLabel(
+            episodes_scroll,
+            text="Fetching episode guide and seasons from database...",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#38BDF8"
+        )
+        loading_lbl.pack(pady=50)
+
+        threading.Thread(
+            target=self.load_episodes_for_explorer,
+            args=(modal, show_item, episodes_scroll, season_opt_menu, season_var, queue_season_btn),
+            daemon=True
+        ).start()
+
+    def load_episodes_for_explorer(self, modal, show_item, episodes_scroll, season_opt_menu, season_var, queue_season_btn):
+        show_id = show_item.get("id")
+        show_title = show_item.get("title", "Show")
+        episodes = []
+
+        if show_id:
+            episodes = AISearchEngine.get_show_episodes(show_id)
+
+        # Fallback if no episodes returned by TVMaze ID
+        if not episodes:
+            search_fallback = AISearchEngine.search_shows(show_title, max_results=1)
+            if search_fallback and search_fallback[0].get("id"):
+                episodes = AISearchEngine.get_show_episodes(search_fallback[0]["id"])
+
+        if not episodes:
+            def render_no_eps():
+                for c in episodes_scroll.winfo_children(): c.destroy()
+                lbl = ctk.CTkLabel(
+                    episodes_scroll,
+                    text="Detailed episode guide not available for this show.\nYou can still use '➕ Queue Best' on the show card to find episodes directly.",
+                    font=ctk.CTkFont(size=13),
+                    text_color=COLOR_TEXT_MUTED
+                )
+                lbl.pack(pady=40)
+            self.after(0, render_no_eps)
+            return
+
+        # Group episodes by season
+        seasons_dict = {}
+        for ep in episodes:
+            s_num = ep.get("season", 1)
+            seasons_dict.setdefault(s_num, []).append(ep)
+
+        sorted_seasons = sorted(seasons_dict.keys())
+        season_labels = [f"Season {s} ({len(seasons_dict[s])} Episodes)" for s in sorted_seasons]
+        season_map = {f"Season {s} ({len(seasons_dict[s])} Episodes)": s for s in sorted_seasons}
+
+        def on_season_select(choice):
+            target_s = season_map.get(choice, sorted_seasons[0])
+            ep_list = seasons_dict.get(target_s, [])
+            self.render_season_episodes(modal, episodes_scroll, show_item, ep_list)
+            queue_season_btn.configure(
+                state="normal",
+                command=lambda: self.queue_entire_season(show_title, target_s, ep_list)
+            )
+
+        def setup_ui_after_fetch():
+            if not modal.winfo_exists():
+                return
+            season_opt_menu.configure(values=season_labels, command=on_season_select)
+            if season_labels:
+                season_var.set(season_labels[0])
+                on_season_select(season_labels[0])
+
+        self.after(0, setup_ui_after_fetch)
+
+    def render_season_episodes(self, modal, episodes_scroll, show_item, season_episodes):
+        if not modal.winfo_exists():
+            return
+        for c in episodes_scroll.winfo_children():
+            c.destroy()
+
+        show_title = show_item.get("title", "Show")
+
+        for ep in season_episodes:
+            s_num = ep.get("season", 1)
+            e_num = ep.get("number", 1)
+            ep_name = ep.get("name", "Episode")
+            airdate = ep.get("airdate", "N/A")
+            runtime = ep.get("runtime")
+            run_str = f"{runtime} min" if runtime else ""
+            summary = ep.get("summary", "")
+
+            card = ctk.CTkFrame(episodes_scroll, fg_color=COLOR_CARD, corner_radius=8)
+            card.pack(fill="x", padx=4, pady=5)
+            card.grid_columnconfigure(1, weight=1)
+
+            # S01E01 Badge
+            tag_lbl = ctk.CTkLabel(
+                card,
+                text=f"S{s_num:02d}E{e_num:02d}",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color="#FFFFFF",
+                fg_color="#1E3A8A",
+                corner_radius=6,
+                width=65,
+                height=30
+            )
+            tag_lbl.grid(row=0, column=0, padx=10, pady=10)
+
+            # Details
+            details_f = ctk.CTkFrame(card, fg_color="transparent")
+            details_f.grid(row=0, column=1, sticky="ew", padx=5, pady=8)
+
+            t_lbl = ctk.CTkLabel(
+                details_f,
+                text=f"{e_num}. {ep_name}",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                anchor="w"
+            )
+            t_lbl.pack(fill="x")
+
+            sub_parts = []
+            if airdate and airdate != "N/A": sub_parts.append(f"🗓 Airdate: {airdate}")
+            if run_str: sub_parts.append(f"⏱ Runtime: {run_str}")
+            if sub_parts:
+                meta_l = ctk.CTkLabel(
+                    details_f,
+                    text="  |  ".join(sub_parts),
+                    font=ctk.CTkFont(size=10, weight="bold"),
+                    text_color="#38BDF8",
+                    anchor="w"
+                )
+                meta_l.pack(fill="x", pady=(1, 2))
+
+            if summary:
+                s_lbl = ctk.CTkLabel(
+                    details_f,
+                    text=summary[:160] + ("..." if len(summary) > 160 else ""),
+                    font=ctk.CTkFont(size=10),
+                    text_color="#8E92A2",
+                    anchor="w",
+                    justify="left"
+                )
+                s_lbl.pack(fill="x")
+
+            # Actions
+            btn_f = ctk.CTkFrame(card, fg_color="transparent")
+            btn_f.grid(row=0, column=2, padx=10, pady=8, sticky="e")
+
+            dl_btn = ctk.CTkButton(
+                btn_f,
+                text="⬇ Downloader",
+                width=100,
+                height=30,
+                fg_color=COLOR_ACCENT,
+                hover_color=COLOR_ACCENT_HOVER,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda s=s_num, e=e_num, n=ep_name: self.send_episode_to_downloader(modal, show_title, s, e, n)
+            )
+            dl_btn.pack(side="left", padx=3)
+
+            q_ep_btn = ctk.CTkButton(
+                btn_f,
+                text="➕ Queue",
+                width=80,
+                height=30,
+                fg_color="#1E3A8A",
+                hover_color="#1D4ED8",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda s=s_num, e=e_num, n=ep_name: self.add_episode_to_queue(show_title, s, e, n)
+            )
+            q_ep_btn.pack(side="left", padx=3)
+
+            cp_btn = ctk.CTkButton(
+                btn_f,
+                text="🔗",
+                width=32,
+                height=30,
+                fg_color="#2B2F3A",
+                hover_color="#3A3F4E",
+                font=ctk.CTkFont(size=11),
+                command=lambda s=s_num, e=e_num, n=ep_name: self.copy_to_clipboard(f"{show_title} S{s:02d}E{e:02d} {n}")
+            )
+            cp_btn.pack(side="left", padx=3)
+
+    def send_episode_to_downloader(self, modal, show_title, season, number, ep_name):
+        search_target = f"{show_title} S{season:02d}E{number:02d} {ep_name}"
+        self.tabview.set(" 📥 Downloader ")
+        self.url_entry.delete(0, tk.END)
+        self.url_entry.insert(0, search_target)
+        self.start_fetch_info_thread()
+        try:
+            modal.destroy()
+        except Exception:
+            pass
+
+    def add_episode_to_queue(self, show_title, season, number, ep_name):
+        target_query = f"ytsearch1:{show_title} S{season:02d}E{number:02d} {ep_name}"
+        display_title = f"{show_title} S{season:02d}E{number:02d} - {ep_name}"
+        q_item = QueueItem(
+            url=target_query,
+            title=display_title,
+            mode=self.format_mode_var.get(),
+            quality=self.quality_var.get(),
+            cookie_source=self.cookie_var.get(),
+            subtitles=self.subtitles_var.get(),
+            save_folder=self.folder_entry.get().strip() or self.save_folder,
+            channel_or_studio=show_title,
+            platform="TV Shows",
+            is_live=False,
+            show_info={"show": show_title, "season": season, "episode": number}
+        )
+        self.add_queue_item(q_item)
+        messagebox.showinfo("Queue", f"Added episode to Download Queue:\n\n'{display_title}'")
+
+    def queue_entire_season(self, show_title, season_num, season_episodes):
+        added_count = 0
+        for ep in season_episodes:
+            s_num = ep.get('season', season_num)
+            e_num = ep.get('number', 1)
+            name = ep.get('name', 'Episode')
+            target_query = f"ytsearch1:{show_title} S{s_num:02d}E{e_num:02d} {name}"
+            display_title = f"{show_title} S{s_num:02d}E{e_num:02d} - {name}"
+            q_item = QueueItem(
+                url=target_query,
+                title=display_title,
+                mode=self.format_mode_var.get(),
+                quality=self.quality_var.get(),
+                cookie_source=self.cookie_var.get(),
+                subtitles=self.subtitles_var.get(),
+                save_folder=self.folder_entry.get().strip() or self.save_folder,
+                channel_or_studio=show_title,
+                platform="TV Shows",
+                is_live=False,
+                show_info={"show": show_title, "season": s_num, "episode": e_num}
+            )
+            self.add_queue_item(q_item)
+            added_count += 1
+
+        messagebox.showinfo(
+            "Season Queued",
+            f"Successfully queued {added_count} episodes of {show_title} (Season {season_num}) to the Download Queue!\n\nSwitch to the Queue tab to manage or start batch downloads."
+        )
+
+
+    # ==========================================
+    # TAB: LIVE STREAMS & DVR RECORDER
+    # ==========================================
+    def build_livestreams_tab(self):
+        tab = self.tab_livestreams
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(3, weight=1)
+
+        # Top Section: Direct Live Stream Recorder & DVR Box
+        recorder_card = ctk.CTkFrame(tab, fg_color=COLOR_CARD, corner_radius=12)
+        recorder_card.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
+        recorder_card.grid_columnconfigure(1, weight=1)
+
+        rec_header = ctk.CTkLabel(
+            recorder_card,
+            text="🔴 Direct Live Stream Recorder & Real-Time DVR",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#EF4444"
+        )
+        rec_header.grid(row=0, column=0, columnspan=5, sticky="w", padx=15, pady=(10, 4))
+
+        self.livestream_direct_url = ctk.CTkEntry(
+            recorder_card,
+            placeholder_text="Paste Live Stream URL (YouTube Live, Twitch, Kick, direct .m3u8 HLS)...",
+            font=ctk.CTkFont(size=12),
+            height=38
+        )
+        self.livestream_direct_url.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(15, 6), pady=(0, 8))
+
+        paste_btn = ctk.CTkButton(
+            recorder_card,
+            text="📋 Paste",
+            width=70,
+            height=38,
+            fg_color="#2B2F3A",
+            hover_color="#3A3F4E",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self.paste_direct_live_url
+        )
+        paste_btn.grid(row=1, column=2, padx=(0, 6), pady=(0, 8))
+
+        rec_now_btn = ctk.CTkButton(
+            recorder_card,
+            text="🔴 Record Now",
+            width=120,
+            height=38,
+            fg_color="#DC2626",
+            hover_color="#B91C1C",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.start_direct_live_record
+        )
+        rec_now_btn.grid(row=1, column=3, padx=(0, 6), pady=(0, 8))
+
+        q_live_btn = ctk.CTkButton(
+            recorder_card,
+            text="➕ Queue Stream",
+            width=110,
+            height=38,
+            fg_color="#1E3A8A",
+            hover_color="#1D4ED8",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.queue_direct_live_stream
+        )
+        q_live_btn.grid(row=1, column=4, padx=(0, 15), pady=(0, 8))
+
+        self.livestream_dvr_var = ctk.BooleanVar(value=True)
+        dvr_chk = ctk.CTkCheckBox(
+            recorder_card,
+            text="Record from Stream Start (Live DVR / --live-from-start)",
+            variable=self.livestream_dvr_var,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#DC2626"
+        )
+        dvr_chk.grid(row=2, column=0, columnspan=5, sticky="w", padx=15, pady=(0, 10))
+
+        # Real-time Discovery Header & Search Bar
+        disc_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        disc_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
+        disc_frame.grid_columnconfigure(0, weight=1)
+
+        self.livestream_search_entry = ctk.CTkEntry(
+            disc_frame,
+            placeholder_text="🔍 Discover Live Streams: e.g. 'breaking news', 'gaming tournament', 'lofi hip hop 24/7'...",
+            font=ctk.CTkFont(size=13),
+            height=40
+        )
+        self.livestream_search_entry.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        self.livestream_search_entry.bind("<Return>", lambda e: self.start_livestreams_search())
+
+        live_search_btn = ctk.CTkButton(
+            disc_frame,
+            text="🔍 Search Live",
+            width=120,
+            height=40,
+            fg_color="#DC2626",
+            hover_color="#B91C1C",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.start_livestreams_search
+        )
+        live_search_btn.grid(row=0, column=1, padx=(0, 6))
+
+        refresh_btn = ctk.CTkButton(
+            disc_frame,
+            text="🔄 Refresh Feeds",
+            width=120,
+            height=40,
+            fg_color="#2B2F3A",
+            hover_color="#3A3F4E",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.refresh_livestreams
+        )
+        refresh_btn.grid(row=0, column=2)
+
+        # Category Chips Bar
+        cat_chips_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        cat_chips_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 6))
+
+        categories = [
+            ("🌟 All Live Feeds", "all"),
+            ("🎮 Gaming & Twitch", "gaming"),
+            ("📰 Breaking News", "news"),
+            ("🎵 24/7 Music / Lofi", "music"),
+            ("🎙 Podcasts", "podcasts")
+        ]
+
+        self.livestream_cat_var = ctk.StringVar(value="all")
+        for label, cat in categories:
+            btn = ctk.CTkButton(
+                cat_chips_frame,
+                text=label,
+                height=30,
+                corner_radius=15,
+                fg_color="#20232D",
+                hover_color="#2E3342",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda c=cat: self.filter_livestreams_by_cat(c)
+            )
+            btn.pack(side="left", padx=4)
+
+        # Results Scrollable Frame
+        self.livestream_results_scroll = ctk.CTkScrollableFrame(
+            tab,
+            fg_color=COLOR_BG,
+            corner_radius=10,
+            label_text="🔴 Live Streams Discovery (YouTube Live & Twitch)",
+            label_font=ctk.CTkFont(size=14, weight="bold")
+        )
+        self.livestream_results_scroll.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.livestream_results_scroll.grid_columnconfigure(0, weight=1)
+
+        # Initial live feeds load
+        self.after(400, self.refresh_livestreams)
+
+    def paste_direct_live_url(self):
+        try:
+            txt = self.clipboard_get().strip()
+            if txt:
+                self.livestream_direct_url.delete(0, tk.END)
+                self.livestream_direct_url.insert(0, txt)
+        except Exception:
+            pass
+
+    def start_direct_live_record(self):
+        url = self.livestream_direct_url.get().strip()
+        if not url:
+            messagebox.showwarning("Input Missing", "Please enter or paste a live stream URL.")
+            return
+
+        self.tabview.set(" 📥 Downloader ")
+        self.url_entry.delete(0, tk.END)
+        self.url_entry.insert(0, url)
+        self.live_dvr_chk_var.set(self.livestream_dvr_var.get())
+        self.start_fetch_info_thread()
+
+    def queue_direct_live_stream(self):
+        url = self.livestream_direct_url.get().strip()
+        if not url:
+            messagebox.showwarning("Input Missing", "Please enter or paste a live stream URL.")
+            return
+
+        dvr = self.livestream_dvr_var.get()
+        q_item = QueueItem(
+            url=url,
+            title="Live Stream Recording",
+            mode="video",
+            quality=self.quality_var.get(),
+            cookie_source=self.cookie_var.get(),
+            subtitles=False,
+            save_folder=self.folder_entry.get().strip() or self.save_folder,
+            channel_or_studio="Live Broadcast",
+            platform="Live Stream",
+            is_live=True,
+            live_from_start=dvr
+        )
+        self.add_queue_item(q_item)
+        messagebox.showinfo("Queue", f"Added Live Stream to Download Queue:\n\n{url}")
+
+    def filter_livestreams_by_cat(self, cat):
+        self.livestream_cat_var.set(cat)
+        self.start_livestreams_search(category=cat)
+
+    def refresh_livestreams(self):
+        cat = self.livestream_cat_var.get()
+        q = self.livestream_search_entry.get().strip()
+        self.start_livestreams_search(query=q, category=cat)
+
+    def start_livestreams_search(self, query=None, category=None):
+        target_q = query if query is not None else self.livestream_search_entry.get().strip()
+        target_cat = category if category is not None else self.livestream_cat_var.get()
+
+        for child in self.livestream_results_scroll.winfo_children():
+            child.destroy()
+
+        loading_lbl = ctk.CTkLabel(
+            self.livestream_results_scroll,
+            text=f"🔴 Scanning live channels and Twitch broadcasts...",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#EF4444"
+        )
+        loading_lbl.pack(pady=50)
+
+        threading.Thread(target=self.livestreams_search_worker, args=(target_q, target_cat), daemon=True).start()
+
+    def livestreams_search_worker(self, query, category):
+        try:
+            results = AISearchEngine.search_livestreams(query=query, category=category, max_results=16)
+            self.after(0, lambda: self.render_livestreams_results(results))
+        except Exception as e:
+            err = str(e)
+            self.after(0, lambda: self.render_livestreams_error(err))
+
+    def render_livestreams_error(self, err):
+        for child in self.livestream_results_scroll.winfo_children():
+            child.destroy()
+        lbl = ctk.CTkLabel(self.livestream_results_scroll, text=f"Live stream discovery failed:\n{err}", text_color=COLOR_DANGER)
+        lbl.pack(pady=50)
+
+    def render_livestreams_results(self, results):
+        for child in self.livestream_results_scroll.winfo_children():
+            child.destroy()
+
+        if not results:
+            lbl = ctk.CTkLabel(
+                self.livestream_results_scroll,
+                text="No active live streams found for this category right now.\nClick '🔄 Refresh Feeds' or try another category.",
+                font=ctk.CTkFont(size=13),
+                text_color=COLOR_TEXT_MUTED
+            )
+            lbl.pack(pady=50)
+            return
+
+        for idx, item in enumerate(results):
+            card = self.create_livestream_card(idx, item)
+            card.pack(fill="x", padx=5, pady=6)
+
+    def create_livestream_card(self, idx, item):
+        card = ctk.CTkFrame(self.livestream_results_scroll, fg_color=COLOR_CARD, corner_radius=10)
+        card.grid_columnconfigure(1, weight=1)
+
+        plat = item.get("platform", "Live")
+        p_color = "#9146FF" if "Twitch" in plat else "#DC2626"
+
+        # Left Column: Badges
+        thumb_f = ctk.CTkFrame(card, fg_color="#12131A", width=120, height=85, corner_radius=8)
+        thumb_f.grid(row=0, column=0, padx=12, pady=12, sticky="ns")
+        thumb_f.pack_propagate(False)
+
+        live_badge = ctk.CTkLabel(
+            thumb_f,
+            text="🔴 LIVE NOW",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#FFFFFF",
+            fg_color="#DC2626",
+            corner_radius=6
+        )
+        live_badge.pack(anchor="nw", padx=5, pady=(5, 2))
+
+        plat_badge = ctk.CTkLabel(
+            thumb_f,
+            text=plat,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#FFFFFF",
+            fg_color=p_color,
+            corner_radius=6
+        )
+        plat_badge.pack(anchor="nw", padx=5, pady=2)
+
+        # Center Column: Rich Metadata
+        info_f = ctk.CTkFrame(card, fg_color="transparent")
+        info_f.grid(row=0, column=1, padx=(0, 10), pady=10, sticky="ew")
+
+        title_lbl = ctk.CTkLabel(
+            info_f,
+            text=f"{idx+1}. {item.get('title', 'Live Stream')}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+            justify="left"
+        )
+        title_lbl.pack(fill="x")
+
+        streamer = item.get("channel_or_studio", "Broadcaster")
+        score = item.get("score", "🔴 Live")
+        cat_name = item.get("category") or item.get("episodes") or ""
+        meta_parts = [f"🎙 {streamer}", score]
+        if cat_name and "🔴" not in cat_name:
+            meta_parts.append(cat_name)
+
+        meta_lbl = ctk.CTkLabel(
+            info_f,
+            text="  |  ".join(meta_parts),
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#F87171" if "YouTube" in plat else "#C084FC",
+            anchor="w"
+        )
+        meta_lbl.pack(fill="x", pady=(2, 2))
+
+        desc = item.get("description", "")
+        if desc:
+            desc_lbl = ctk.CTkLabel(
+                info_f,
+                text=desc[:180] + ("..." if len(desc) > 180 else ""),
+                font=ctk.CTkFont(size=10),
+                text_color="#8E92A2",
+                anchor="w",
+                justify="left"
+            )
+            desc_lbl.pack(fill="x")
+
+        # Right Column: Action Buttons
+        btn_f = ctk.CTkFrame(card, fg_color="transparent")
+        btn_f.grid(row=0, column=2, padx=12, pady=10, sticky="e")
+
+        rec_btn = ctk.CTkButton(
+            btn_f,
+            text="🔴 Record Stream",
+            width=125,
+            height=34,
+            fg_color="#DC2626",
+            hover_color="#B91C1C",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=lambda it=item: self.record_livestream_item(it)
+        )
+        rec_btn.pack(side="left", padx=3)
+
+        q_btn = ctk.CTkButton(
+            btn_f,
+            text="➕ Queue",
+            width=85,
+            height=34,
+            fg_color="#1E3A8A",
+            hover_color="#1D4ED8",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=lambda it=item: self.add_livestream_item_to_queue(it)
+        )
+        q_btn.pack(side="left", padx=3)
+
+        watch_btn = ctk.CTkButton(
+            btn_f,
+            text="🌐 Watch",
+            width=75,
+            height=34,
+            fg_color=p_color,
+            hover_color="#3A3F4E",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=lambda u=item.get("platform_url") or item.get("url"): self.open_browser_url(u)
+        )
+        watch_btn.pack(side="left", padx=3)
+
+        copy_btn = ctk.CTkButton(
+            btn_f,
+            text="🔗 Copy",
+            width=60,
+            height=34,
+            fg_color="#2B2F3A",
+            hover_color="#3A3F4E",
+            font=ctk.CTkFont(size=11),
+            command=lambda u=item.get("url"): self.copy_to_clipboard(u)
+        )
+        copy_btn.pack(side="left", padx=3)
+
+        return card
+
+    def record_livestream_item(self, item):
+        url = item.get("url")
+        self.tabview.set(" 📥 Downloader ")
+        self.url_entry.delete(0, tk.END)
+        self.url_entry.insert(0, url)
+        self.live_dvr_chk_var.set(True)
+        self.start_fetch_info_thread()
+
+    def add_livestream_item_to_queue(self, item):
+        url = item.get("url")
+        title = item.get("title", "Live Stream")
+        channel = item.get("channel_or_studio", "Live Streamer")
+        platform = item.get("platform", "Live Stream")
+
+        q_item = QueueItem(
+            url=url,
+            title=title,
+            mode="video",
+            quality=self.quality_var.get(),
+            cookie_source=self.cookie_var.get(),
+            subtitles=False,
+            save_folder=self.folder_entry.get().strip() or self.save_folder,
+            channel_or_studio=channel,
+            platform=platform,
+            is_live=True,
+            live_from_start=True
+        )
+        self.add_queue_item(q_item)
+        messagebox.showinfo("Queue", f"Added Live Stream to Download Queue:\n\n'{title}'\nSource: {channel} ({platform})")
 
 
     # ==========================================

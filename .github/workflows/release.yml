@@ -9,13 +9,13 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release Tag (e.g. v4.0.0)'
+        description: 'Release Tag (e.g. v4.1.0)'
         required: false
-        default: 'v4.0.0'
+        default: 'v4.1.0'
       release_title:
         description: 'Release Title'
         required: false
-        default: 'Universal Video Downloader Pro v4.0.0'
+        default: 'Universal Video Downloader Pro v4.1.0'
 
 permissions:
   contents: write
