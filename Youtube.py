@@ -32,7 +32,7 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 APP_NAME = "Universal Video Downloader Pro"
-APP_VERSION = "v4.1.0"
+APP_VERSION = "v4.1.1"
 HISTORY_FILE = "download_history.json"
 OLD_HISTORY_FILE = "download_history.txt"
 SETTINGS_FILE = "settings.json"

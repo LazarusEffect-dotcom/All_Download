@@ -1,15 +1,23 @@
-# Universal Video Downloader Pro v4.1.0
+# Universal Video Downloader Pro v4.1.1
 
 A modern, high-performance desktop video & audio downloader application for Windows built with Python, CustomTkinter, and `yt-dlp`.
 
 ![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-brightgreen.svg)
-![Release](https://img.shields.io/badge/Release-v4.1.0-red.svg)
+![Release](https://img.shields.io/badge/Release-v4.1.1-red.svg)
 ![yt-dlp](https://img.shields.io/badge/yt--dlp-2026%2B%20Latest-orange.svg)
 
 ---
 
-## 🌟 What's New in Version 4.1.0
+## 🌟 What's New in Version 4.1.1
+
+### Fix: Dedicated TV Shows & Live Streams Tabs Now Visible
+- **Rebuilt executable** with all 7 navigation tabs properly displayed: 📥 Downloader, 📑 Queue, 🤖 AI Discovery, 📺 TV Shows, 🔴 Live Streams, 📜 History, ⚙ Settings.
+- Previous `.exe` (v4.0.0) was built before the new tabs were added to source code — this release corrects that.
+
+---
+
+## 🌟 Features (Full List from v4.1.0+)
 
 ### 1. 📺 TV Shows & Episode Explorer
 - **Dedicated TV Shows Discovery**: Browse curated hit television series (e.g., *Breaking Bad*, *Stranger Things*, *The Boys*, *Game of Thrones*, *Fallout*, *Shogun*, *Arcane*) or search any global television or web series via TVMaze.
@@ -52,7 +60,7 @@ A modern, high-performance desktop video & audio downloader application for Wind
 
 ### Option 1: Pre-built Windows Executable (.exe)
 1. Head over to the **[GitHub Releases](https://github.com/LazarusEffect-dotcom/All_Download/releases)** section.
-2. Download `Youtube.exe` or `Youtube-Downloader-Windows-x64.zip` from release **v4.1.0**.
+2. Download `Youtube.exe` or `Youtube-Downloader-Windows-x64.zip` from release **v4.1.1**.
 3. Run the executable directly. FFmpeg is embedded; no installation or Python required!
 
 ---
@@ -104,11 +112,11 @@ This repository includes a GitHub Actions workflow (`.github/workflows/release.y
 ### Deploying a New Release:
 1. **Push a Git tag**:
    ```bash
-   git tag v4.1.0
-   git push origin v4.1.0
+   git tag v4.1.1
+   git push origin v4.1.1
    ```
 2. **Or trigger manually via GitHub Actions**:
    - Go to your repository on GitHub.
    - Click on the **Actions** tab.
    - Select **Build and Release Windows Executable**.
-   - Click **Run workflow**, specify the release tag (`v4.1.0`), and run.
+   - Click **Run workflow**, specify the release tag (`v4.1.1`), and run.
